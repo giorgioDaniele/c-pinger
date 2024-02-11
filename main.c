@@ -75,6 +75,16 @@ checksum(void *pkt, unsigned int size) {
     unsigned int   sum    = 0;
     unsigned char* buffer = (unsigned char*) pkt;
 
+    /**
+     * Per calcolare il checksum, si utilizza questa
+     * strategia: si suddivide la PDU ICMP in sequenze
+     * da 16 bit ciascuna. Le sequenze vengono sommate
+     * ma ad ogni somma, occorre rappresentare solo
+     * gli ultimi 16 bit del risultato. Alla fine,
+     * ogni bit deve essere invertito: complementazione
+     * del risultato ad 1.
+    */
+
     for (i = 0; i < size; i += 2) {
         unsigned char  b1 = (unsigned char) buffer[i];
         unsigned char  b2 = (unsigned char) buffer[i + 1];
@@ -100,6 +110,14 @@ fill_icmp_request(
     memcpy(pkt + sizeof(struct icmphdr), &timestamp, TIMESTAMP_SIZE);
     memset(pkt + sizeof(struct icmphdr) + TIMESTAMP_SIZE, 0xFF, PACKET_SIZE - TIMESTAMP_SIZE);
 
+    /**
+     * La funzione genera un pacchetto di tipo
+     * ICMP ECHO REQUEST con un payload di 64 
+     * bytes. I primi 8 byte contengono il
+     * riferimento temporale che serve per
+     * calcolare il RTT.
+    */
+
     icmp = (struct icmphdr*) pkt;
     icmp->type       = ICMP_ECHO;
     icmp->code       = 0;
@@ -122,31 +140,38 @@ fill_icmp_reply(
 
     unsigned long  now  = get_timestamp_ns();
     unsigned long  past;
+    double         rtt;
 
     ipv4 = (struct iphdr*)   pkt;
     icmp = (struct icmphdr*) (pkt + (ipv4->ihl * 4));
 
     if (icmp->type == ICMP_ECHOREPLY) {
+        /**
+         * Verifica che il messaggio ricevuto sia
+         * ICMP ECHO REPLY
+        */
         if (psz >= (sizeof(struct icmphdr) + sizeof(struct iphdr) + TIMESTAMP_SIZE)) {
-   
-            memcpy(&past, pkt + (ipv4->ihl * 4) + sizeof(struct icmphdr), TIMESTAMP_SIZE);
-            past = ntohll(past);
-
-            unsigned long rtt_ns = now - past;
-            double        rtt    = (double) rtt_ns / 1000000.0;
-
-            printf("ping: %d bytes with seq = %d from %s, ttl = %d, rtt = %.2f ms\n",
-                psz - (sizeof(struct icmphdr) + sizeof(struct iphdr)),
-                icmp->un.echo.sequence,
-                add,
-                ipv4->ttl, 
-                rtt);
-        } else {
-            printf("ping: %d bytes with seq = %d from %s, ttl = %d, no timestamp found\n",
-                psz - (sizeof(struct icmphdr) + sizeof(struct iphdr)),
-                icmp->un.echo.sequence,
-                add,
-                ipv4->ttl);
+            /**
+             * Verifica che il messaggio sia destinato al processo
+             * corrente.
+            */
+            if(getpid() == icmp->un.echo.id) {
+                memcpy(&past, pkt + (ipv4->ihl * 4) + sizeof(struct icmphdr), TIMESTAMP_SIZE);
+                past = ntohll(past);
+                rtt  = (double) (now - past) / 1000000.0;
+                /**
+                 * Dopo aver calcolato il RTT, stampa le statistiche
+                 * a video. Il RTT è calcolato in ms, sottraendo dal
+                 * timestamp attuale quello contenuto nel pacchetto.
+                 * Entrambe le quantità sono espresse in nanosecondi.
+                */
+                printf("ping: %d bytes with seq = %d from %s, ttl = %d, rtt = %.2f ms\n",
+                       psz - (sizeof(struct icmphdr) + sizeof(struct iphdr)),
+                       icmp->un.echo.sequence,
+                       add,
+                       ipv4->ttl,
+                       rtt);
+            }
         }
     }
     return;
@@ -165,7 +190,7 @@ sender(void* args) {
     socklen_t len = sizeof(struct sockaddr);
 
     params = (struct thread_args*) args;
-    nbytes =  PACKET_SIZE + sizeof(struct icmphdr);;
+    nbytes =  PACKET_SIZE + sizeof(struct icmphdr);
 
     while (exiting) {
         fill_icmp_request(params->pkt);
@@ -252,6 +277,12 @@ main(int argc, char** argv) {
     rx_args.pkt = in_pkt;
     rx_args.dst = dst;
     rx_args.add = argv[1];
+
+    /**
+     * Il processo utilizza due thread: il primo serve per
+     * generare traffico ICMP, l'altro ascolta le risposte
+     * provenienti dallo stesso socket.
+    */
 
     if (pthread_create(&tx, NULL, sender, (void *)&tx_args)) {
         printf("ping: can't create sender.\n");
